@@ -2,7 +2,7 @@
 
 const size_t MAX_TENSOR_PRINT_SIZE = 1000;
 
-Tensor::Tensor(const std::vector<size_t>& shape, float defaultVal) : _shape{shape} {
+bassinet::Tensor::Tensor(const std::vector<size_t>& shape, float defaultVal) : _shape{shape} {
     if (shape.size() == 0) throw std::invalid_argument("Tensor: Empty shape given");
 
     size_t size = 1;
@@ -17,20 +17,20 @@ Tensor::Tensor(const std::vector<size_t>& shape, float defaultVal) : _shape{shap
 }
 
 
-const std::vector<size_t>& Tensor::shape() {
+const std::vector<size_t>& bassinet::Tensor::shape() {
     return _shape;
 }
 
-const std::vector<size_t>& Tensor::stride() {
+const std::vector<size_t>& bassinet::Tensor::stride() {
     return _stride;
 }
 
-size_t Tensor::size() {
+size_t bassinet::Tensor::size() {
     return _data.size();
 }
 
 
-float& Tensor::at(const std::vector<size_t>& loc) {
+float& bassinet::Tensor::at(const std::vector<size_t>& loc) {
     if (loc.size() != _shape.size()) throw std::invalid_argument("Tensor::at: Index does not match tensor shape");
 
     size_t trueIdx{0};
@@ -40,7 +40,7 @@ float& Tensor::at(const std::vector<size_t>& loc) {
     return _data[trueIdx];
 }
 
-float Tensor::at(const std::vector<size_t>& loc) const {
+float bassinet::Tensor::at(const std::vector<size_t>& loc) const {
     if (loc.size() != _shape.size()) throw std::invalid_argument("Tensor::at: Index does not match tensor shape");
 
     size_t trueIdx{0};
@@ -51,7 +51,7 @@ float Tensor::at(const std::vector<size_t>& loc) const {
 }
 
 
-void Tensor::reshape(const std::vector<size_t>& newShape) {
+void bassinet::Tensor::reshape(const std::vector<size_t>& newShape) {
     size_t newSize{1};
     std::vector<size_t> newStride{std::vector<size_t>(newShape.size())};
     for (size_t i = newStride.size(); i-- > 0; ) {
@@ -65,7 +65,7 @@ void Tensor::reshape(const std::vector<size_t>& newShape) {
     _stride = newStride;
 }
 
-Tensor Tensor::operator+(const Tensor& other) {
+bassinet::Tensor bassinet::Tensor::operator+(const Tensor& other) {
     std::vector<size_t> resShape(std::max(_shape.size(), other._shape.size()));
 
     std::vector<size_t> thisBroadcastStride(resShape.size());
@@ -112,7 +112,7 @@ Tensor Tensor::operator+(const Tensor& other) {
     return res;
 }
 
-Tensor Tensor::matmul(const Tensor& other) {
+bassinet::Tensor bassinet::Tensor::matmul(const Tensor& other) {
     size_t N, K, M; // this shape (M, K), other shape (K, N), result shape (M, N)
     bool thisPromoted{false}, otherPromoted{false};
 
@@ -227,7 +227,8 @@ void printTensor(std::ostream& out, const std::vector<float>& data,
     }
     out << "]";
 }
-std::ostream& operator<<(std::ostream& out, const Tensor& t) {
+
+std::ostream& bassinet::operator<<(std::ostream& out, const bassinet::Tensor& t) { // namespace resolved through ADL
     if (t._data.size() > MAX_TENSOR_PRINT_SIZE) {
         out << "[Tensor too large to print - size > 1000]";
         return out;
