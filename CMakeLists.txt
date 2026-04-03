@@ -7,7 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include_directories(include)
 
-add_library(bassinet STATIC src/tensor.cpp)
+file(GLOB LIB_SOURCES "src/*.cpp")
+add_library(bassinet STATIC ${LIB_SOURCES})
 
 # Config GTest
 include(FetchContent)

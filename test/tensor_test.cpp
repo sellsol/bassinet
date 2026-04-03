@@ -27,6 +27,35 @@ TEST(TensorTest, AtModify) {
     EXPECT_FLOAT_EQ(t.at({0, 1}), 3.14f);
 }
 
+TEST(TensorTest, Transpose2D) {
+    bassinet::Tensor t({2, 3}, 0.0f);
+    t.at({0, 0}) = 1; t.at({0, 1}) = 2; t.at({0, 2}) = 3;
+    t.at({1, 0}) = 4; t.at({1, 1}) = 5; t.at({1, 2}) = 6;
+
+    bassinet::Tensor tT = t.transpose(0, 1);
+    EXPECT_EQ(tT.shape(), std::vector<size_t>({3, 2}));
+    EXPECT_FLOAT_EQ(tT.at({0, 0}), 1);
+    EXPECT_FLOAT_EQ(tT.at({1, 0}), 2);
+    EXPECT_FLOAT_EQ(tT.at({2, 0}), 3);
+    EXPECT_FLOAT_EQ(tT.at({0, 1}), 4);
+    EXPECT_FLOAT_EQ(tT.at({1, 1}), 5);
+    EXPECT_FLOAT_EQ(tT.at({2, 1}), 6);
+}
+TEST(TensorTest, Transpose3D) {
+    bassinet::Tensor t({2, 3, 4}, 0.0f);
+    for (size_t i = 0; i < 2; ++i)
+        for (size_t j = 0; j < 3; ++j)
+            for (size_t k = 0; k < 4; ++k)
+                t.at({i, j, k}) = 100 * i + 10 * j + k;
+
+    bassinet::Tensor tT = t.transpose(0, 2);
+    EXPECT_EQ(tT.shape(), std::vector<size_t>({4, 3, 2}));
+    for (size_t i = 0; i < 2; ++i)
+        for (size_t j = 0; j < 3; ++j)
+            for (size_t k = 0; k < 4; ++k)
+                EXPECT_FLOAT_EQ(tT.at({k, j, i}), t.at({i, j, k}));
+}
+
 
 TEST(TensorTest, Addition) {
     bassinet::Tensor a({2, 2}, 1.0f);

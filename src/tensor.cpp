@@ -2,7 +2,7 @@
 
 const size_t MAX_TENSOR_PRINT_SIZE = 1000;
 
-bassinet::Tensor::Tensor(const std::vector<size_t>& shape, float defaultVal) : _shape{shape} {
+bassinet::Tensor::Tensor(const std::vector<size_t>& shape, float defaultVal, bool gradRequired) : _shape{shape}, _gradRequired{gradRequired} {
     if (shape.size() == 0) throw std::invalid_argument("Tensor: Empty shape given");
 
     size_t size = 1;
@@ -12,21 +12,57 @@ bassinet::Tensor::Tensor(const std::vector<size_t>& shape, float defaultVal) : _
         _stride[i] = size;
         size *= _shape[i];
     }
+    _data = std::make_shared<std::vector<float>>(size, defaultVal);
 
-    _data = std::vector<float>(size, defaultVal);
+    if (_gradRequired) _grad = std::vector<float>(size, 0.0f);
 }
 
+bassinet::Tensor::Tensor(std::vector<float> data, const std::vector<std::size_t>& shape, const std::vector<std::size_t>& stride, bool gradRequired, std::function<void(std::vector<Tensor*>&, Tensor&)> gradFn, const std::vector<Tensor*>& parents) : _data{std::make_shared<std::vector<float>>(data)}, _shape{shape}, _stride{stride}, _gradRequired{gradRequired}, _gradFn{gradFn}, _parents{parents} {
+    if (shape.size() != stride.size()) throw std::invalid_argument("Tensor: shape and stride must have the same number of dimensions");
 
-const std::vector<size_t>& bassinet::Tensor::shape() {
+    size_t maxIdx{0};
+    for (size_t i = 0; i < shape.size(); ++i) {
+        maxIdx += (shape[i] - 1) * stride[i];
+    }
+    if (maxIdx + 1 != data.size()) throw std::invalid_argument("Tensor: shape and stride does not match data size");
+
+    if (_gradRequired) _grad = std::vector<float>(size(), 0.0f);
+}
+
+bassinet::Tensor::Tensor(std::shared_ptr<std::vector<float>> data, const std::vector<std::size_t>& shape, const std::vector<std::size_t>& stride, bool gradRequired, std::function<void(std::vector<Tensor*>&, Tensor&)> gradFn, const std::vector<Tensor*>& parents) : _data{data}, _shape{shape}, _stride{stride}, _gradRequired{gradRequired}, _gradFn{gradFn}, _parents{parents} {
+    if (shape.size() != stride.size()) throw std::invalid_argument("Tensor: shape and stride must have the same number of dimensions");
+
+    size_t maxIdx{0};
+    for (size_t i = 0; i < shape.size(); ++i) {
+        maxIdx += (shape[i] - 1) * stride[i];
+    }
+    if (maxIdx + 1 != data->size()) throw std::invalid_argument("Tensor: shape and stride does not match data size");
+
+    if (_gradRequired) _grad = std::vector<float>(size(), 0.0f);
+}
+
+const std::shared_ptr<std::vector<float>>& bassinet::Tensor::rawData() const {
+    return _data;
+}
+
+const std::vector<size_t>& bassinet::Tensor::shape() const {
     return _shape;
 }
 
-const std::vector<size_t>& bassinet::Tensor::stride() {
+const std::vector<size_t>& bassinet::Tensor::stride() const {
     return _stride;
 }
 
-size_t bassinet::Tensor::size() {
-    return _data.size();
+size_t bassinet::Tensor::size() const {
+    return _data->size();
+}
+
+bool bassinet::Tensor::gradRequired() const {
+    return _gradRequired;
+}
+
+const std::vector<float>& bassinet::Tensor::grad() const {
+    return _grad;
 }
 
 
@@ -37,7 +73,7 @@ float& bassinet::Tensor::at(const std::vector<size_t>& loc) {
     for (size_t i = 0; i < loc.size(); ++i) {
         trueIdx += loc[i] * _stride[i];
     }
-    return _data[trueIdx];
+    return (*_data)[trueIdx];
 }
 
 float bassinet::Tensor::at(const std::vector<size_t>& loc) const {
@@ -47,162 +83,80 @@ float bassinet::Tensor::at(const std::vector<size_t>& loc) const {
     for (size_t i = 0; i < loc.size(); ++i) {
         trueIdx += loc[i] * _stride[i];
     }
-    return _data[trueIdx];
+    return (*_data)[trueIdx];
 }
 
+bassinet::Tensor bassinet::Tensor::transpose(size_t dim0, size_t dim1) const {
+    if (dim0 >= _shape.size() || dim1 >= _shape.size()) throw std::out_of_range("Tensor::transpose: Dimensions to transpose out of bounds");
 
-void bassinet::Tensor::reshape(const std::vector<size_t>& newShape) {
-    size_t newSize{1};
-    std::vector<size_t> newStride{std::vector<size_t>(newShape.size())};
-    for (size_t i = newStride.size(); i-- > 0; ) {
-        if (i != newStride.size() - 1) newStride[i] = newStride[i + 1];
-        newStride[i] = newSize;
-        newSize *= _shape[i];
-    }
+    Tensor transposed(_data, _shape, _stride);
+    std::swap(transposed._shape[dim0], transposed._shape[dim1]);
+    std::swap(transposed._stride[dim0], transposed._stride[dim1]);
 
-    if (newSize != _data.size()) throw std::invalid_argument("Tensor::reshape:: New shape does not have equal number of elements");
-    _shape = newShape;
-    _stride = newStride;
+    return transposed;
 }
 
-bassinet::Tensor bassinet::Tensor::operator+(const Tensor& other) {
-    std::vector<size_t> resShape(std::max(_shape.size(), other._shape.size()));
+// bassinet::Tensor bassinet::Tensor::flatten(std::size_t start, std::size_t end) const {
+//     if (start >= _shape.size() || end >= _shape.size()) throw std::out_of_range("Tensor::flatten: Dimensions to transpose out of bounds");
+//     if (start > end) throw std::invalid_argument("Tensor::flatten: Start is larger than end");
 
-    std::vector<size_t> thisBroadcastStride(resShape.size());
-    std::vector<size_t> otherBroadcastStride(resShape.size());
-    size_t thisOffset{1};
-    size_t otherOffset{1};
-    for (size_t i = 0; i < resShape.size(); ++i) {
-        size_t thisDimShape, otherDimShape;
-        if (_shape.size() >= i + 1) { // _shape.size() - 1 - i >= 0
-            thisDimShape = _shape[_shape.size() - 1 - i];
-            thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = (thisDimShape == 1) ? 0 : thisOffset;
-            if (thisDimShape != 1) thisOffset *= thisDimShape;
-        } else {
-            thisDimShape = 1; // actually 0, but easier comparison like this
-            thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = 0;
-        }
+//     bool isContiguous{true};
+//     for (size_t i = start; i < end; ++i) {
+//         if (_stride[i] != _stride[i + 1] + _shape[i + 1]) {
+//             isContiguous = false;
+//             break;
+//         }
+//     }
+//     if (!isContiguous) throw std::invalid_argument("Tensor::flatten: Tensor view not contiguous"); // TODO: allocate new tensor and copy the data in the correct order. Just errors for now.
 
-        if (other._shape.size() >= i + 1) {
-            otherDimShape = other._shape[other._shape.size() - 1 - i];
-            otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = (otherDimShape == 1) ? 0 : otherOffset;
-            if (otherDimShape != 1) otherOffset *= otherDimShape;
-        } else {
-            otherDimShape = 1;
-            otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = 0;
-        }
+//     std::vector<size_t> resStride;
+//     std::vector<size_t> resShape;
+//     for (size_t i = 0; i < start; ++i) {
+//         resStride.push_back(_stride[i]); resShape.push_back(_shape[i]);
+//     }
 
-        if (thisDimShape != otherDimShape && thisDimShape != 1 && otherDimShape != 1) throw std::invalid_argument("Tensor::matmul: Tensor batch dimensions not the same or broadcastable");
+//     size_t minStride{_stride[start]};
+//     size_t totalSize{_shape[start]};
+//     for (size_t i = start + 1; i <= end; ++i) {
+//         minStride = std::min(minStride, _stride[i]);
+//         totalSize *= _shape[i];
+//     }
+//     resStride.push_back(minStride); resShape.push_back(totalSize);
 
-        resShape[resShape.size() - 1 - i] = std::max(thisDimShape, otherDimShape);
+//     for (size_t i = end + 1; i < _shape.size(); ++i) {
+//         resStride.push_back(_stride[i]); resShape.push_back(_shape[i]);
+//     }
+
+//     return Tensor(_data, resShape, resStride);
+// }
+
+void bassinet::Tensor::addToData(const std::vector<float>& additions) {
+    if (size() != additions.size()) throw std::invalid_argument("Tensor::addToData: Data to add does not match existing data size");
+
+    for (size_t i = 0; i < size(); ++i) {
+        (*_data)[i] = additions[i];
     }
-
-    Tensor res(resShape);
-    for (size_t idx = 0; idx < res._data.size(); ++idx) {
-        size_t remainder{idx};
-        size_t thisIdx{0}, otherIdx{0};
-        for (size_t i = resShape.size(); i-- > 0; ) {
-            size_t coord = remainder % resShape[i];
-            thisIdx += coord * thisBroadcastStride[i];
-            otherIdx += coord * otherBroadcastStride[i];
-            remainder /= resShape[i];
-        }
-        res._data[idx] = _data[thisIdx] + other._data[otherIdx];
-    }
-    return res;
 }
 
-bassinet::Tensor bassinet::Tensor::matmul(const Tensor& other) {
-    size_t N, K, M; // this shape (M, K), other shape (K, N), result shape (M, N)
-    bool thisPromoted{false}, otherPromoted{false};
+void bassinet::Tensor::zeroGrad() {
+    std::fill(_grad.begin(), _grad.end(), 0.0f);
+}
 
-    if (_shape.size() == 1) {
-        thisPromoted = true;
-        M = 1;
-        K = _shape[0];
-    } else {
-        M = _shape[_shape.size() - 2];
-        K = _shape[_shape.size() - 1];
+void bassinet::Tensor::addToGrad(const std::vector<float>& additions) {
+    if (additions.size() != _grad.size()) throw std::invalid_argument("Tensor::addToGrad: Gradients to add does not match existing gradient shape");
+
+    for (size_t i = 0; i < _grad.size(); ++i) {
+        _grad[i] += additions[i];
     }
+}
 
-    if (other._shape.size() == 1) {
-        if (K != other._shape[0]) throw std::invalid_argument("Tensor::matmul: Tensor dimensions not overlapping");
-        otherPromoted = true;
-        N = 1;
-    } else {
-        if (K != other._shape[other._shape.size() - 2]) throw std::invalid_argument("Tensor::matmul: Tensor dimensions not overlapping");
-        N = other._shape[other._shape.size() - 1];
+void bassinet::Tensor::backward() {
+    if (!_gradRequired) return;
+
+    _gradFn(_parents, *this);
+    for (Tensor* parent : _parents) {
+        parent->backward();
     }
-
-    std::vector<size_t> resShape(std::max(_shape.size(), other._shape.size()));
-    if (resShape.size() == 1) {
-        resShape[0] = 1;
-    } else {
-        resShape[resShape.size() - 2] = M;
-        resShape[resShape.size() - 1] = N;
-    }
-
-    std::vector<size_t> thisBroadcastStride(resShape.size());
-    std::vector<size_t> otherBroadcastStride(resShape.size());
-    size_t thisOffset{M * K};
-    size_t otherOffset{K * N};
-    size_t batchCount{1};
-    for (size_t i = 2; i < resShape.size(); ++i) {
-        size_t thisDimShape, otherDimShape;
-        if (_shape.size() >= i + 1) { // _shape.size() - 1 - i >= 0
-            thisDimShape = _shape[_shape.size() - 1 - i];
-            thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = thisOffset;
-            thisOffset *= _shape[_shape.size() - 1 - i];
-        } else {
-            thisDimShape = 1; // actually 0, but easier comparison like this
-            thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = 0;
-        }
-
-        if (other._shape.size() >= i + 1) {
-            otherDimShape = other._shape[other._shape.size() - 1 - i];
-            otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = otherOffset;
-            otherOffset *= other._shape[other._shape.size() - 1 - i];
-        } else {
-            otherDimShape = 1;
-            otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = 0;
-        }
-
-        if (thisDimShape != otherDimShape && thisDimShape != 1 && otherDimShape != 1) throw std::invalid_argument("Tensor::matmul: Tensor batch dimensions not the same or broadcastable");
-
-        resShape[resShape.size() - 1 - i] = std::max(thisDimShape, otherDimShape);
-        batchCount *= resShape[resShape.size() - 1 - i];
-    }
-
-    Tensor res(resShape);
-
-    for (size_t batch = 0; batch < batchCount; ++batch) {
-        size_t batchRemainder{batch};
-        size_t resBatchOffset{0}, thisBatchOffset{0}, otherBatchOffset{0};
-        if (resShape.size() > 2) {
-            for (size_t i = 0; i < resShape.size() - 2; ++i) {
-                resBatchOffset += (batchRemainder % resShape[i]) * res._stride[i];
-                thisBatchOffset += (batchRemainder % resShape[i]) * thisBroadcastStride[i];
-                otherBatchOffset += (batchRemainder % resShape[i]) * otherBroadcastStride[i];
-                batchRemainder /= resShape[i];
-            }
-        }
-
-        for (size_t resRow = 0; resRow < M; ++resRow) {
-            for (size_t resCol = 0; resCol < N; ++resCol) {
-                for (size_t k = 0; k < K; ++k) {
-                    res._data[resBatchOffset + (resRow * (res._stride.size() > 1 ? res._stride[res._stride.size() - 2] : 0) + resCol)]
-                    += _data[thisBatchOffset + (resRow * K + k)]
-                    * other._data[otherBatchOffset + (k * N) + resCol];
-                }
-            }
-        }
-    }
-
-    if (otherPromoted && thisPromoted) { res._shape = {1}; }
-    else if (otherPromoted) { res._shape.pop_back(); res._stride.pop_back(); }
-    else if (thisPromoted) { res._shape.erase(res._shape.begin()); res._stride.erase(res._stride.begin()); }
-
-    return res;
 }
 
 
@@ -228,12 +182,211 @@ void printTensor(std::ostream& out, const std::vector<float>& data,
     out << "]";
 }
 
-std::ostream& bassinet::operator<<(std::ostream& out, const bassinet::Tensor& t) { // namespace resolved through ADL
-    if (t._data.size() > MAX_TENSOR_PRINT_SIZE) {
+std::ostream& bassinet::operator<<(std::ostream& out, const bassinet::Tensor& t) {
+    if (t.size() > MAX_TENSOR_PRINT_SIZE) {
         out << "[Tensor too large to print - size > 1000]";
         return out;
     }
 
-    printTensor(out, t._data, t._shape, t._stride, 0, 0);
+    printTensor(out, *t.rawData(), t.shape(), t.stride(), 0, 0);
     return out;
+}
+
+
+class AddOp: public bassinet::TensorOp {
+    public:
+    bassinet::Tensor forward(const std::vector<bassinet::Tensor*>& parents) override {
+        if (parents.size() != 2) throw std::invalid_argument("AddOp::forward: Operation only supports two parents");
+
+        std::vector<size_t> resShape(std::max(parents[0]->shape().size(), parents[1]->shape().size()));
+
+        std::vector<size_t> thisBroadcastStride(resShape.size());
+        std::vector<size_t> otherBroadcastStride(resShape.size());
+        size_t thisOffset{1};
+        size_t otherOffset{1};
+        for (size_t i = 0; i < resShape.size(); ++i) {
+            size_t thisDimShape, otherDimShape;
+            if (parents[0]->shape().size() >= i + 1) { // shape.size() - 1 - i >= 0
+                thisDimShape = parents[0]->shape()[parents[0]->shape().size() - 1 - i];
+                thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = (thisDimShape == 1) ? 0 : thisOffset;
+                if (thisDimShape != 1) thisOffset *= thisDimShape;
+            } else {
+                thisDimShape = 1; // actually 0, but easier comparison like this
+                thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = 0;
+            }
+
+            if (parents[1]->shape().size() >= i + 1) {
+                otherDimShape = parents[1]->shape()[parents[1]->shape().size() - 1 - i];
+                otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = (otherDimShape == 1) ? 0 : otherOffset;
+                if (otherDimShape != 1) otherOffset *= otherDimShape;
+            } else {
+                otherDimShape = 1;
+                otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = 0;
+            }
+
+            if (thisDimShape != otherDimShape && thisDimShape != 1 && otherDimShape != 1) throw std::invalid_argument("Tensor::matmul: Tensor batch dimensions not the same or broadcastable");
+
+            resShape[resShape.size() - 1 - i] = std::max(thisDimShape, otherDimShape);
+        }
+
+        size_t resSize{1};
+        std::vector<size_t> resStride{std::vector<size_t>(resShape.size())};
+        for (size_t i = resStride.size(); i-- > 0; ) {
+            if (i != resStride.size() - 1) resStride[i] = resStride[i + 1];
+            resStride[i] = resSize;
+            resSize *= resShape[i];
+        }
+        std::shared_ptr<std::vector<float>> resData{std::make_shared<std::vector<float>>(resSize)};
+
+        for (size_t idx = 0; idx < (*resData).size(); ++idx) {
+            size_t remainder{idx};
+            size_t thisIdx{0}, otherIdx{0};
+            for (size_t i = resShape.size(); i-- > 0; ) {
+                size_t coord = remainder % resShape[i];
+                thisIdx += coord * thisBroadcastStride[i];
+                otherIdx += coord * otherBroadcastStride[i];
+                remainder /= resShape[i];
+            }
+            (*resData)[idx] = (*parents[0]->rawData())[thisIdx] + (*parents[1]->rawData())[otherIdx];
+        }
+
+        return bassinet::Tensor(resData, resShape, resStride, true, [this](std::vector<bassinet::Tensor*>& parents, bassinet::Tensor& child) { this->backward(parents, child); }, parents);
+    }
+
+    void backward(const std::vector<bassinet::Tensor*>& parents, bassinet::Tensor& child) override {
+        if (parents.size() != 2) throw std::invalid_argument("MatmulOp::forward: Operation only supports two parents");
+
+        if (parents[0]->gradRequired()) parents[0]->addToGrad(child.grad());
+        if (parents[1]->gradRequired()) parents[1]->addToGrad(child.grad());
+    }
+};
+
+bassinet::Tensor bassinet::Tensor::operator+(Tensor& other) {
+    AddOp op;
+    return op.forward({this, &other});
+}
+
+class MatmulOp: public bassinet::TensorOp {
+    public:
+    bassinet::Tensor forward(const std::vector<bassinet::Tensor*>& parents) override {
+        if (parents.size() != 2) throw std::invalid_argument("MatmulOp::forward: Operation only supports two parents");
+
+        size_t N, K, M; // this shape (M, K), other shape (K, N), result shape (M, N)
+        bool thisPromoted{false}, otherPromoted{false};
+
+        if (parents[0]->shape().size() == 1) {
+            thisPromoted = true;
+            M = 1;
+            K = parents[0]->shape()[0];
+        } else {
+            M = parents[0]->shape()[parents[0]->shape().size() - 2];
+            K = parents[0]->shape()[parents[0]->shape().size() - 1];
+        }
+
+        if (parents[1]->shape().size() == 1) {
+            if (K != parents[1]->shape()[0]) throw std::invalid_argument("Tensor::matmul: Tensor dimensions not overlapping");
+            otherPromoted = true;
+            N = 1;
+        } else {
+            if (K != parents[1]->shape()[parents[1]->shape().size() - 2]) throw std::invalid_argument("Tensor::matmul: Tensor dimensions not overlapping");
+            N = parents[1]->shape()[parents[1]->shape().size() - 1];
+        }
+
+        std::vector<size_t> resShape(std::max(parents[0]->shape().size(), parents[1]->shape().size()));
+        if (resShape.size() == 1) {
+            resShape[0] = 1;
+        } else {
+            resShape[resShape.size() - 2] = M;
+            resShape[resShape.size() - 1] = N;
+        }
+
+        std::vector<size_t> thisBroadcastStride(resShape.size());
+        std::vector<size_t> otherBroadcastStride(resShape.size());
+        size_t thisOffset{M * K};
+        size_t otherOffset{K * N};
+        size_t batchCount{1};
+        for (size_t i = 2; i < resShape.size(); ++i) {
+            size_t thisDimShape, otherDimShape;
+            if (parents[0]->shape().size() >= i + 1) { // _shape.size() - 1 - i >= 0
+                thisDimShape = parents[0]->shape()[parents[0]->shape().size() - 1 - i];
+                thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = thisOffset;
+                thisOffset *= parents[0]->shape()[parents[0]->shape().size() - 1 - i];
+            } else {
+                thisDimShape = 1; // actually 0, but easier comparison like this
+                thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = 0;
+            }
+
+            if (parents[1]->shape().size() >= i + 1) {
+                otherDimShape = parents[1]->shape()[parents[1]->shape().size() - 1 - i];
+                otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = otherOffset;
+                otherOffset *= parents[1]->shape()[parents[1]->shape().size() - 1 - i];
+            } else {
+                otherDimShape = 1;
+                otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = 0;
+            }
+
+            if (thisDimShape != otherDimShape && thisDimShape != 1 && otherDimShape != 1) throw std::invalid_argument("Tensor::matmul: Tensor batch dimensions not the same or broadcastable");
+
+            resShape[resShape.size() - 1 - i] = std::max(thisDimShape, otherDimShape);
+            batchCount *= resShape[resShape.size() - 1 - i];
+        }
+
+        size_t resSize{1};
+        std::vector<size_t> resStride{std::vector<size_t>(resShape.size())};
+        for (size_t i = resStride.size(); i-- > 0; ) {
+            if (i != resStride.size() - 1) resStride[i] = resStride[i + 1];
+            resStride[i] = resSize;
+            resSize *= resShape[i];
+        }
+        std::shared_ptr<std::vector<float>> resData{std::make_shared<std::vector<float>>(resSize)};
+
+        for (size_t batch = 0; batch < batchCount; ++batch) {
+            size_t batchRemainder{batch};
+            size_t resBatchOffset{0}, thisBatchOffset{0}, otherBatchOffset{0};
+            if (resShape.size() > 2) {
+                for (size_t i = 0; i < resShape.size() - 2; ++i) {
+                    resBatchOffset += (batchRemainder % resShape[i]) * resStride[i];
+                    thisBatchOffset += (batchRemainder % resShape[i]) * thisBroadcastStride[i];
+                    otherBatchOffset += (batchRemainder % resShape[i]) * otherBroadcastStride[i];
+                    batchRemainder /= resShape[i];
+                }
+            }
+
+            for (size_t resRow = 0; resRow < M; ++resRow) {
+                for (size_t resCol = 0; resCol < N; ++resCol) {
+                    for (size_t k = 0; k < K; ++k) {
+                        (*resData)[resBatchOffset + (resRow * (resStride.size() > 1 ? resStride[resStride.size() - 2] : 0) + resCol)]
+                        += (*parents[0]->rawData())[thisBatchOffset + (resRow * K + k)]
+                        * (*parents[1]->rawData())[otherBatchOffset + (k * N) + resCol];
+                    }
+                }
+            }
+        }
+
+        if (otherPromoted && thisPromoted) { resShape = {1}; }
+        else if (otherPromoted) { resShape.pop_back(); resStride.pop_back(); }
+        else if (thisPromoted) { resShape.erase(resShape.begin()); resStride.erase(resStride.begin()); }
+
+        return bassinet::Tensor(resData, resShape, resStride, true, [this](std::vector<bassinet::Tensor*>& parents, bassinet::Tensor& child) { this->backward(parents, child); }, parents);
+    }
+
+    void backward(const std::vector<bassinet::Tensor*>& parents, bassinet::Tensor& child) override {
+        if (parents.size() != 2) throw std::invalid_argument("MatmulOp::forward: Operation only supports two parents");
+
+        if (parents[0]->gradRequired()) {
+            bassinet::Tensor gradTensor(child.grad(), child.shape(), child.stride());
+            bassinet::Tensor bT{parents[1]->transpose(parents[1]->size() - 1, parents[1]->size() - 2)};
+            parents[0]->addToGrad(*forward({&gradTensor, &bT}).rawData());
+        }
+        if (parents[1]->gradRequired()) {
+            bassinet::Tensor gradTensor(child.grad(), child.shape(), child.stride());
+            bassinet::Tensor aT{parents[0]->transpose(parents[0]->size() - 1, parents[0]->size() - 2)};
+            parents[1]->addToGrad(*forward({&aT, &gradTensor}).rawData());
+        }
+    }
+};
+
+bassinet::Tensor bassinet::Tensor::matmul(Tensor& other) {
+    MatmulOp op;
+    return op.forward({this, &other});
 }
