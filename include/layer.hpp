@@ -4,21 +4,15 @@
 #include "tensor.hpp"
 
 namespace bassinet {
-    class Layer  {
-    public:
-        virtual Tensor forward(Tensor& x) = 0;
-        virtual std::vector<Tensor*> parameters() = 0;
-    };
-
-    class Linear : public Layer {
+    class Linear {
     private:
         Tensor _weights; // shape: (inputSize, outputSize)
         Tensor _biases; // shape: (outputSize)
 
     public:
-        Linear(std::size_t inputSize, std::size_t outputSize);
+        Linear(size_t inputSize, size_t outputSize);
 
-        Tensor forward(Tensor& x) override;
-        std::vector<Tensor*> parameters() override;
+        Tensor forward(Tensor& x);
+        std::vector<Tensor> parameters();
     };
 }

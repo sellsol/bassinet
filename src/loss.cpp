@@ -1,30 +1,38 @@
 #include "loss.hpp"
 
-class MSELoss: public bassinet::TensorOp {
-    public:
-    bassinet::Tensor forward(const std::vector<bassinet::Tensor*>& parents) override {
-        if (parents.size() != 2) throw std::invalid_argument("TensorOop::forward: Operation only supports two parents");
-        if (parents[0]->size() != parents[1]->size()) throw std::invalid_argument("mseLoss: prediction and target sizes not equal");
+// TODO: multiple reduction types - currently only sum
+void mselossBackwardSum(std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents, bassinet::TensorIntl& child);
+bassinet::Tensor mselossForwardSum(const std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents) {
+    if (parents.size() != 2) throw std::invalid_argument("mselossForward: Operation only supports two parents");
+    if (parents[0]->size() != parents[1]->size()) throw std::invalid_argument("mseLoss: prediction and target sizes not equal");
 
-        // TODO: multiple cases at once
-        float sum{0};
-        for (size_t i = 0; i < parents[0]->size(); ++i) {
-            float diff{(*parents[0]->rawData())[i] - (*parents[1]->rawData())[i]};
-            sum += diff * diff;
-        }
-
-        return bassinet::Tensor(std::vector<float>(1, sum / parents[0]->size()), {1}, {1}, true, [this](std::vector<bassinet::Tensor*>& parents, bassinet::Tensor& child) { this->backward(parents, child); }, parents);
+    float sum{0};
+    for (size_t i = 0; i < parents[0]->size(); ++i) {
+        float diff{(*parents[0]->data())[i] - (*parents[1]->data())[i]};
+        sum += diff * diff;
     }
 
-    void backward(const std::vector<bassinet::Tensor*>& parents, bassinet::Tensor& child) override {
-        if (parents.size() != 2) throw std::invalid_argument("MatmulOp::forward: Operation only supports two parents");
+    return bassinet::Tensor(
+        std::vector<float>(1, sum / parents[0]->size()), {1}, {1},
+        parents[0]->gradRequired() || parents[1]->gradRequired(),
+        mselossBackwardSum, parents
+    );
+}
 
-        if (parents[0]->gradRequired()) parents[0]->addToGrad(child.grad());
-        if (parents[1]->gradRequired()) parents[1]->addToGrad(child.grad());
+void mselossBackwardSum(std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents, bassinet::TensorIntl& child) {
+    if (parents.size() != 2) throw std::invalid_argument("mselossBackward: Operation only supports two parents");
+    if (!parents[0]->gradRequired() || parents[1]->gradRequired()) throw std::invalid_argument("mselossBackward: parents should be in order {pred, target}");
+
+    float sum{child.grad()[0]};
+    std::vector<float> predGrad(parents[0]->size());
+    for (size_t i = 0; i < predGrad.size(); ++i) {
+        float diff{(*parents[0]->data())[i] - (*parents[1]->data())[i]};
+        predGrad[i] = sum * (2.0 / predGrad.size()) * diff;
     }
-};
+
+    parents[0]->addToGrad(predGrad);
+}
 
 bassinet::Tensor bassinet::mseLoss(bassinet::Tensor& pred, bassinet::Tensor& target) {
-    MSELoss op;
-    return op.forward({&pred, &target});
+    return mselossForwardSum({pred.intl, target.intl}); // order is important for grad func
 }

@@ -6,6 +6,6 @@ bassinet::Tensor bassinet::Linear::forward(Tensor& x) {
     return x.matmul(_weights) + _biases;
 }
 
-std::vector<bassinet::Tensor*> bassinet::Linear::parameters() {
-    return {&_weights, &_biases};
+std::vector<bassinet::Tensor> bassinet::Linear::parameters() {
+    return {_weights, _biases};
 }
