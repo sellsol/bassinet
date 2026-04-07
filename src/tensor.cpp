@@ -2,21 +2,6 @@
 
 const size_t MAX_TENSOR_PRINT_SIZE = 1000;
 
-bassinet::TensorIntl::TensorIntl(const std::vector<size_t>& shape, float defaultVal, bool gradRequired) : _shape{shape}, _gradRequired{gradRequired} {
-    if (shape.size() == 0) throw std::invalid_argument("Tensor: Empty shape given");
-
-    size_t size = 1;
-    _stride = std::vector<size_t>(shape.size());
-    for (size_t i = _stride.size(); i-- > 0; ) {
-        if (i != _stride.size() - 1) _stride[i] = _stride[i + 1];
-        _stride[i] = size;
-        size *= _shape[i];
-    }
-    _data = std::make_shared<std::vector<float>>(size, defaultVal);
-
-    if (_gradRequired) _grad = std::vector<float>(size, 0.0f);
-}
-
 bassinet::TensorIntl::TensorIntl(std::vector<float> data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn, const std::vector<std::shared_ptr<TensorIntl>>& parents) : _data{std::make_shared<std::vector<float>>(data)}, _shape{shape}, _stride{stride}, _gradRequired{gradRequired}, _gradFn{gradFn}, _parents{parents} {
     if (shape.size() != stride.size()) throw std::invalid_argument("Tensor: shape and stride must have the same number of dimensions");
 
@@ -39,6 +24,20 @@ bassinet::TensorIntl::TensorIntl(std::shared_ptr<std::vector<float>> data, const
     if (maxIdx + 1 != data->size()) throw std::invalid_argument("Tensor: shape and stride does not match data size");
 
     if (_gradRequired) _grad = std::vector<float>(size(), 0.0f);
+}
+
+bassinet::TensorIntl bassinet::TensorIntl::zeros(const std::vector<size_t>& shape, bool gradRequired) {
+    if (shape.size() == 0) throw std::invalid_argument("Tensor: Empty shape given");
+
+    std::vector<size_t> stride(shape.size());
+    size_t size = 1;
+    for (size_t i = stride.size(); i-- > 0; ) {
+        if (i != stride.size() - 1) stride[i] = stride[i + 1];
+        stride[i] = size;
+        size *= shape[i];
+    }
+
+    return TensorIntl(std::vector<float>(size), shape, stride, gradRequired);
 }
 
 
@@ -167,13 +166,15 @@ std::ostream& bassinet::operator<<(std::ostream& out, const bassinet::TensorIntl
 }
 
 
-bassinet::Tensor::Tensor(const std::vector<size_t>& shape, float defaultVal, bool gradRequired) : intl{std::make_shared<bassinet::TensorIntl>(shape, defaultVal, gradRequired)} {}
-
 bassinet::Tensor::Tensor(std::vector<float> data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn, const std::vector<std::shared_ptr<TensorIntl>>& parents) : intl{std::make_shared<bassinet::TensorIntl>(data, shape, stride, gradRequired, gradFn, parents)} {}
 
 bassinet::Tensor::Tensor(std::shared_ptr<std::vector<float>>& data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired, std::function<void(std::vector<std::shared_ptr<bassinet::TensorIntl>>&, bassinet::TensorIntl&)> gradFn, const std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents) : intl{std::make_shared<bassinet::TensorIntl>(data, shape, stride, gradRequired, gradFn, parents)} {}
 
 bassinet::Tensor::Tensor(std::shared_ptr<bassinet::TensorIntl> internal) : intl{internal} {}
+
+bassinet::Tensor bassinet::Tensor::zeros(const std::vector<size_t>& shape, bool gradRequired) {
+    return Tensor(std::make_shared<bassinet::TensorIntl>(bassinet::TensorIntl::zeros(shape, gradRequired)));
+}
 
 
 void addBackward(std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents, bassinet::TensorIntl& child);
