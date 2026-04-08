@@ -18,11 +18,12 @@ namespace bassinet {
         std::vector<std::shared_ptr<TensorIntl>> _parents;
 
     public:
-        TensorIntl(std::vector<float> data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired = false, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn = nullptr, const std::vector<std::shared_ptr<TensorIntl>>& parents = {});
-        TensorIntl(std::shared_ptr<std::vector<float>> data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired = false, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn = nullptr, const std::vector<std::shared_ptr<TensorIntl>>& parents = {});
-        static TensorIntl zeros(const std::vector<size_t>& shape, bool gradRequired = false);
+        TensorIntl() = default;
         template <typename T> // function defined in same file
-        static TensorIntl from_nd(const std::vector<T>& data, bool gradRequired = false);
+        TensorIntl(const std::vector<T> data, bool gradRequired = false);
+        static TensorIntl zeros(const std::vector<size_t>& shape, bool gradRequired = false);
+        static TensorIntl fromMove(const std::vector<float> data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired = false, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn = nullptr, const std::vector<std::shared_ptr<TensorIntl>>& parents = {}); // TODO
+        static TensorIntl fromMove(const std::shared_ptr<std::vector<float>>& data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired = false, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn = nullptr, const std::vector<std::shared_ptr<TensorIntl>>& parents = {});
 
         const std::shared_ptr<std::vector<float>>& data() const;
         const std::vector<size_t>& shape() const;
@@ -47,12 +48,12 @@ namespace bassinet {
     public:
         std::shared_ptr<TensorIntl> intl;
 
-        Tensor(std::vector<float> data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired = false, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn = nullptr, const std::vector<std::shared_ptr<TensorIntl>>& parents = {});
-        Tensor(std::shared_ptr<std::vector<float>>& data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired = false, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn = nullptr, const std::vector<std::shared_ptr<TensorIntl>>& parents = {});
         Tensor(std::shared_ptr<TensorIntl> intl);
-        static Tensor zeros(const std::vector<size_t>& shape, bool gradRequired = false);
         template <typename T> // function defined in same file
-        static Tensor from_nd(const std::vector<T>& data, bool gradRequired = false);
+        Tensor(const std::vector<T>& data, bool gradRequired = false);
+        static Tensor zeros(const std::vector<size_t>& shape, bool gradRequired = false);
+        static Tensor fromMove(const std::vector<float> data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired = false, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn = nullptr, const std::vector<std::shared_ptr<TensorIntl>>& parents = {}); // TODO
+        static Tensor fromMove(const std::shared_ptr<std::vector<float>>& data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired = false, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn = nullptr, const std::vector<std::shared_ptr<TensorIntl>>& parents = {});
 
         Tensor operator+(Tensor& other);
         Tensor matmul(Tensor& other);
@@ -77,25 +78,23 @@ void flattenVecRec(const std::vector<T>& vec, std::vector<float>& flattened, std
     }
 }
 template <typename T>
-inline bassinet::TensorIntl bassinet::TensorIntl::from_nd(const std::vector<T>& data, bool gradRequired) {
-    std::vector<float> tdata;
-    std::vector<size_t> tshape;
-    flattenVecRec(data, tdata, tshape, 0);
+inline bassinet::TensorIntl::TensorIntl(const std::vector<T> data, bool gradRequired) {
+    std::vector<float> flattened;
+    flattenVecRec(data, flattened, _shape, 0);
+    _data = std::make_shared<std::vector<float>>(flattened);
 
-    std::vector<size_t> stride(tshape.size());
-    size_t size = 1;
-    stride = std::vector<size_t>(tshape.size());
-    for (size_t i = stride.size(); i-- > 0; ) {
-        if (i != stride.size() - 1) stride[i] = stride[i + 1];
-        stride[i] = size;
-        size *= tshape[i];
+    _stride = std::vector<size_t>(_shape.size());
+    size_t size{1};
+    for (size_t i = _stride.size(); i-- > 0; ) {
+        if (i != _stride.size() - 1) _stride[i] = _stride[i + 1];
+        _stride[i] = size;
+        size *= _shape[i];
     }
     // assert(size == _data.size());
-    return TensorIntl(tdata, tshape, stride, gradRequired);
+    _gradRequired = gradRequired;
 }
 
 template <typename T>
-inline bassinet::Tensor bassinet::Tensor::from_nd(const std::vector<T>& data, bool gradRequired) {
-    std::shared_ptr<TensorIntl> intl = std::make_shared<bassinet::TensorIntl>(bassinet::TensorIntl::from_nd(data, gradRequired));
-    return Tensor(intl);
+inline bassinet::Tensor::Tensor(const std::vector<T>& data, bool gradRequired) {
+    intl = std::make_shared<bassinet::TensorIntl>(bassinet::TensorIntl(data, gradRequired));
 }

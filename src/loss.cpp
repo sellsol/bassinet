@@ -12,7 +12,7 @@ bassinet::Tensor mselossForwardSum(const std::vector<std::shared_ptr<bassinet::T
         sum += diff * diff;
     }
 
-    return bassinet::Tensor(
+    return bassinet::Tensor::fromMove(
         std::vector<float>(1, sum / parents[0]->size()), {1}, {1},
         parents[0]->gradRequired() || parents[1]->gradRequired(),
         mselossBackwardSum, parents
