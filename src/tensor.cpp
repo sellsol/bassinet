@@ -2,8 +2,33 @@
 
 const size_t MAX_TENSOR_PRINT_SIZE = 1000;
 
+void flattenInitlistRec(const RecursiveList& rl, std::vector<float>& flattened, std::vector<size_t>& shape, size_t depth) {
+    if (rl.vec.empty()) {
+        flattened.push_back(rl.val);
+        return;
+    }
 
-bassinet::TensorIntl bassinet::TensorIntl::zeros(const std::vector<size_t>& shape, bool gradRequired) {
+    if (depth == shape.size()) shape.push_back(rl.vec.size());
+    else if (shape[depth] != rl.vec.size()) throw std::invalid_argument("Tensor: n-dim vector is not rectangular");
+
+    for (const auto& child : rl.vec) {
+        flattenInitlistRec(child, flattened, shape, depth + 1);
+    }
+}
+bassinet::TensorIntl::TensorIntl(std::initializer_list<RecursiveList> data) {
+    std::vector<float> flattened;
+    flattenInitlistRec(data, flattened, _shape, 0);
+    _data = std::make_shared<std::vector<float>>(std::move(flattened));
+
+    _stride = std::vector<size_t>(_shape.size());
+    size_t size{1};
+    for (size_t i = _stride.size(); i-- > 0; ) {
+        _stride[i] = size;
+        size *= _shape[i];
+    }
+}
+
+bassinet::TensorIntl bassinet::TensorIntl::full(const std::vector<size_t>& shape, float val, bool gradRequired) {
     if (shape.size() == 0) throw std::invalid_argument("Tensor: Empty shape given");
 
     std::vector<size_t> stride(shape.size());
@@ -15,11 +40,16 @@ bassinet::TensorIntl bassinet::TensorIntl::zeros(const std::vector<size_t>& shap
     }
 
     TensorIntl newTI;
-    newTI._data = std::make_shared<std::vector<float>>(size);
+    newTI._data = std::make_shared<std::vector<float>>(size, val);
     newTI._shape = shape;
     newTI._stride = stride;
     newTI._gradRequired = gradRequired;
+    if (gradRequired) newTI._grad = std::vector<float>(size, 0.0f);
     return newTI;
+}
+
+bassinet::TensorIntl bassinet::TensorIntl::zeros(const std::vector<size_t>& shape, bool gradRequired) {
+    return bassinet::TensorIntl::full(shape, 0, gradRequired);
 }
 
 bassinet::TensorIntl bassinet::TensorIntl::fromMove(const std::vector<float> data, const std::vector<size_t>& shape, const std::vector<size_t>& stride, bool gradRequired, std::function<void(std::vector<std::shared_ptr<TensorIntl>>&, TensorIntl&)> gradFn, const std::vector<std::shared_ptr<TensorIntl>>& parents) {
@@ -36,6 +66,7 @@ bassinet::TensorIntl bassinet::TensorIntl::fromMove(const std::vector<float> dat
     newTI._shape = shape;
     newTI._stride = stride;
     newTI._gradRequired = gradRequired;
+    if (gradRequired) newTI._grad = std::vector<float>(data.size(), 0.0f);
     newTI._gradFn = gradFn;
     newTI._parents = parents;
     return newTI;
@@ -55,6 +86,7 @@ bassinet::TensorIntl bassinet::TensorIntl::fromMove(const std::shared_ptr<std::v
     newTI._shape = shape;
     newTI._stride = stride;
     newTI._gradRequired = gradRequired;
+    if (gradRequired) newTI._grad = std::vector<float>(data->size(), 0.0f);
     newTI._gradFn = gradFn;
     newTI._parents = parents;
     return newTI;
@@ -186,8 +218,13 @@ std::ostream& bassinet::operator<<(std::ostream& out, const bassinet::TensorIntl
 }
 
 
+bassinet::Tensor::Tensor(std::initializer_list<RecursiveList> data) : intl{std::make_shared<bassinet::TensorIntl>(data)} {}
 
 bassinet::Tensor::Tensor(std::shared_ptr<bassinet::TensorIntl> internal) : intl{internal} {}
+
+bassinet::Tensor bassinet::Tensor::full(const std::vector<size_t>& shape, float val, bool gradRequired) {
+    return Tensor(std::make_shared<bassinet::TensorIntl>(bassinet::TensorIntl::full(shape, val, gradRequired)));
+}
 
 bassinet::Tensor bassinet::Tensor::zeros(const std::vector<size_t>& shape, bool gradRequired) {
     return Tensor(std::make_shared<bassinet::TensorIntl>(bassinet::TensorIntl::zeros(shape, gradRequired)));
