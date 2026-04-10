@@ -51,6 +51,7 @@ namespace bassinet {
     public:
         std::shared_ptr<TensorIntl> intl;
 
+        Tensor() = default;
         Tensor(std::shared_ptr<TensorIntl> intl);
         Tensor(std::initializer_list<RecursiveList> data);
         template <typename T> // function defined in same file
@@ -89,7 +90,7 @@ void flattenTemplateRec(const std::vector<T>& vec, std::vector<float>& flattened
     }
 }
 template <typename T>
-bassinet::TensorIntl::TensorIntl(const std::vector<T> data) {
+bassinet::TensorIntl::TensorIntl(const std::vector<T> data) : _gradRequired{false} {
     std::vector<float> flattened;
     flattenTemplateRec(data, flattened, _shape, 0);
     _data = std::make_shared<std::vector<float>>(flattened);

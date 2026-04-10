@@ -24,7 +24,7 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 # Tests
-file(GLOB TEST_SOURCES "test/*_test.cpp")
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "test/*_test.cpp" "test/*_it.cpp")
 add_executable(run_tests ${TEST_SOURCES})
 target_link_libraries(run_tests PRIVATE bassinet gtest_main)
 

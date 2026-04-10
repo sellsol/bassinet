@@ -15,7 +15,7 @@ void flattenInitlistRec(const RecursiveList& rl, std::vector<float>& flattened, 
         flattenInitlistRec(child, flattened, shape, depth + 1);
     }
 }
-bassinet::TensorIntl::TensorIntl(std::initializer_list<RecursiveList> data) {
+bassinet::TensorIntl::TensorIntl(std::initializer_list<RecursiveList> data): _gradRequired{false} {
     std::vector<float> flattened;
     flattenInitlistRec(data, flattened, _shape, 0);
     _data = std::make_shared<std::vector<float>>(std::move(flattened));
@@ -318,101 +318,102 @@ void matmulBackward(std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents,
 bassinet::Tensor matmulForward(const std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents) {
     if (parents.size() != 2) throw std::invalid_argument("matmulBackward: Operation only supports two parents");
 
-    size_t N, K, M; // this shape (M, K), other shape (K, N), result shape (M, N)
-    bool thisPromoted{false}, otherPromoted{false};
+    std::shared_ptr<bassinet::TensorIntl> a = parents[0];
+    std::shared_ptr<bassinet::TensorIntl> b = parents[1];
+    bool aWas1D{a->shape().size() == 1}; // will check and unpromote at end
+    bool bWas1D{b->shape().size() == 1};
+    if (aWas1D) a = bassinet::Tensor::fromMove(a->data(), {1, a->shape()[0]}, {a->shape()[0], 1}).intl;
+    if (bWas1D) b = bassinet::Tensor::fromMove(b->data(), {b->shape()[0], 1}, {1, 1}).intl;
+    std::shared_ptr<bassinet::TensorIntl> bT{b->transpose(b->shape().size() - 1, b->shape().size() - 2)};
 
-    if (parents[0]->shape().size() == 1) {
-        thisPromoted = true;
-        M = 1;
-        K = parents[0]->shape()[0];
-    } else {
-        M = parents[0]->shape()[parents[0]->shape().size() - 2];
-        K = parents[0]->shape()[parents[0]->shape().size() - 1];
-    }
+    // a shape = (M, K), b shape = (K, N), matmul(a,b) shape = (M, N)
+    const size_t M{a->shape()[a->shape().size() - 2]};
+    const size_t K{a->shape()[a->shape().size() - 1]};
+    if (K != bT->shape()[bT->shape().size() - 1]) throw std::invalid_argument("Tensor::matmul: Tensor dimensions not overlapping");
+    const size_t N{bT->shape()[b->shape().size() - 2]};
 
-    if (parents[1]->shape().size() == 1) {
-        if (K != parents[1]->shape()[0]) throw std::invalid_argument("Tensor::matmul: Tensor dimensions not overlapping");
-        otherPromoted = true;
-        N = 1;
-    } else {
-        if (K != parents[1]->shape()[parents[1]->shape().size() - 2]) throw std::invalid_argument("Tensor::matmul: Tensor dimensions not overlapping");
-        N = parents[1]->shape()[parents[1]->shape().size() - 1];
-    }
+    std::vector<size_t> resShape(std::max(a->shape().size(), b->shape().size()), 1);
+    resShape[resShape.size() - 2] = M;
+    resShape[resShape.size() - 1] = N;
 
-    std::vector<size_t> resShape(std::max(parents[0]->shape().size(), parents[1]->shape().size()));
-    if (resShape.size() == 1) {
-        resShape[0] = 1;
-    } else {
-        resShape[resShape.size() - 2] = M;
-        resShape[resShape.size() - 1] = N;
-    }
-
-    std::vector<size_t> thisBroadcastStride(resShape.size());
-    std::vector<size_t> otherBroadcastStride(resShape.size());
-    size_t thisOffset{M * K};
-    size_t otherOffset{K * N};
-    size_t batchCount{1};
-    for (size_t i = 2; i < resShape.size(); ++i) {
-        size_t thisDimShape, otherDimShape;
-        if (parents[0]->shape().size() >= i + 1) { // _shape.size() - 1 - i >= 0
-            thisDimShape = parents[0]->shape()[parents[0]->shape().size() - 1 - i];
-            thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = thisOffset;
-            thisOffset *= parents[0]->shape()[parents[0]->shape().size() - 1 - i];
-        } else {
-            thisDimShape = 1; // actually 0, but easier comparison like this
-            thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = 0;
-        }
-
-        if (parents[1]->shape().size() >= i + 1) {
-            otherDimShape = parents[1]->shape()[parents[1]->shape().size() - 1 - i];
-            otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = otherOffset;
-            otherOffset *= parents[1]->shape()[parents[1]->shape().size() - 1 - i];
-        } else {
-            otherDimShape = 1;
-            otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = 0;
-        }
-
-        if (thisDimShape != otherDimShape && thisDimShape != 1 && otherDimShape != 1) throw std::invalid_argument("Tensor::matmul: Tensor batch dimensions not the same or broadcastable");
-
-        resShape[resShape.size() - 1 - i] = std::max(thisDimShape, otherDimShape);
-        batchCount *= resShape[resShape.size() - 1 - i];
-    }
-
+    std::vector<size_t> resStride(resShape.size());
     size_t resSize{1};
-    std::vector<size_t> resStride{std::vector<size_t>(resShape.size())};
-    for (size_t i = resStride.size(); i-- > 0; ) {
-        if (i != resStride.size() - 1) resStride[i] = resStride[i + 1];
+    for (size_t i = resShape.size(); i-- > 0; ) {
         resStride[i] = resSize;
         resSize *= resShape[i];
     }
-    std::shared_ptr<std::vector<float>> resData{std::make_shared<std::vector<float>>(resSize)};
+
+    std::vector<size_t> aBroadcastStride(resShape.size(), 0);
+    std::vector<size_t> bBroadcastStride(resShape.size(), 0);
+    size_t aOffset{M * K};
+    size_t bOffset{N * K}; // bT has shape (..., N, K)
+    size_t batchCount{1};
+    for (size_t i = 2; i < resShape.size(); ++i) {
+        const size_t resDim = resShape.size() - 1 - i;
+
+        size_t aDimShape{1}, bDimShape{1};
+        if (a->shape().size() >= i + 1) {
+            aDimShape = a->shape()[a->shape().size() - 1 - i];
+            aBroadcastStride[resDim] = (aDimShape == 1) ? 0 : aOffset;
+            if (aDimShape != 1) aOffset *= aDimShape;
+        }
+        if (bT->shape().size() >= i + 1) {
+            bDimShape = bT->shape()[bT->shape().size() - 1 - i];
+            bBroadcastStride[resDim] = (bDimShape == 1) ? 0 : bOffset;
+            if (bDimShape != 1) bOffset *= bDimShape;
+        }
+        if (aDimShape != bDimShape && aDimShape != 1 && bDimShape != 1) throw std::invalid_argument("Tensor::matmul: Tensor batch dimensions not the same or broadcastable");
+
+        resShape[resDim] = std::max(aDimShape, bDimShape);
+        batchCount *= resShape[resDim];
+    }
+
+    resSize = 1; // recompute result layout since final resShape may be different
+    for (size_t i = resShape.size(); i-- > 0; ) {
+        resStride[i] = resSize;
+        resSize *= resShape[i];
+    }
+    std::shared_ptr<std::vector<float>> resData{std::make_shared<std::vector<float>>(resSize, 0.0f)};
 
     for (size_t batch = 0; batch < batchCount; ++batch) {
         size_t batchRemainder{batch};
-        size_t resBatchOffset{0}, thisBatchOffset{0}, otherBatchOffset{0};
+        size_t resBatchOffset{0}, aBatchOffset{0}, bBatchOffset{0};
         if (resShape.size() > 2) {
             for (size_t i = 0; i < resShape.size() - 2; ++i) {
                 resBatchOffset += (batchRemainder % resShape[i]) * resStride[i];
-                thisBatchOffset += (batchRemainder % resShape[i]) * thisBroadcastStride[i];
-                otherBatchOffset += (batchRemainder % resShape[i]) * otherBroadcastStride[i];
+                aBatchOffset += (batchRemainder % resShape[i]) * aBroadcastStride[i];
+                bBatchOffset += (batchRemainder % resShape[i]) * bBroadcastStride[i];
                 batchRemainder /= resShape[i];
             }
         }
 
         for (size_t resRow = 0; resRow < M; ++resRow) {
             for (size_t resCol = 0; resCol < N; ++resCol) {
+                size_t resIdx{resBatchOffset
+                    + resRow * resStride[resStride.size() - 2]
+                    + resCol * resStride[resStride.size() - 1]};
+
                 for (size_t k = 0; k < K; ++k) {
-                    (*resData)[resBatchOffset + (resRow * (resStride.size() > 1 ? resStride[resStride.size() - 2] : 0) + resCol)]
-                    += (*parents[0]->data())[thisBatchOffset + (resRow * K + k)]
-                    * (*parents[1]->data())[otherBatchOffset + (k * N) + resCol];
+                    const size_t aIdx = aBatchOffset
+                        + resRow * a->stride()[a->shape().size() - 2]
+                        + k * a->stride()[a->shape().size() - 1];
+                    const size_t bIdx = bBatchOffset
+                        + resCol * bT->stride()[bT->shape().size() - 2]
+                        + k * bT->stride()[bT->shape().size() - 1];
+                    (*resData)[resIdx] += (*a->data())[aIdx] * (*bT->data())[bIdx];
                 }
             }
         }
     }
 
-    if (otherPromoted && thisPromoted) { resShape = {1}; }
-    else if (otherPromoted) { resShape.pop_back(); resStride.pop_back(); }
-    else if (thisPromoted) { resShape.erase(resShape.begin()); resStride.erase(resStride.begin()); }
+    if (aWas1D && bWas1D) {
+        resShape = {1}; resStride = {1};
+    } else if (aWas1D) {
+        resShape.erase(resShape.end() - 2);
+        resStride.erase(resStride.end() - 2);
+    } else if (bWas1D) {
+        resShape.pop_back(); resStride.pop_back();
+    }
 
     return bassinet::Tensor::fromMove(
         resData, resShape, resStride,
@@ -424,25 +425,49 @@ bassinet::Tensor matmulForward(const std::vector<std::shared_ptr<bassinet::Tenso
 void matmulBackward(std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents, bassinet::TensorIntl& child) {
     if (parents.size() != 2) throw std::invalid_argument("matmulBackward: Operation only supports two parents");
 
-    if (parents[0]->gradRequired()) {
-        bassinet::Tensor gradTensor = bassinet::Tensor::fromMove(child.grad(), child.shape(), child.stride());
-        if (parents[1]->shape().size() >= 2) {
-            bassinet::Tensor bT{parents[1]->transpose(parents[1]->shape().size() - 1, parents[1]->shape().size() - 2)};
-            parents[0]->addToGrad(*matmulForward({gradTensor.intl, bT.intl}).intl->data());
-        } else {
-            bassinet::Tensor bT{parents[1]};
-            parents[0]->addToGrad(*matmulForward({gradTensor.intl, bT.intl}).intl->data());
+    std::shared_ptr<bassinet::TensorIntl> a = parents[0];
+    std::shared_ptr<bassinet::TensorIntl> b = parents[1];
+    bool aWas1D{a->shape().size() == 1}; // see matmulForward for similar promotion and depromotion logic
+    bool bWas1D{b->shape().size() == 1};
+    if (aWas1D) a = bassinet::Tensor::fromMove(a->data(), {1, a->shape()[0]}, {a->shape()[0], 1}).intl;
+    if (bWas1D) b = bassinet::Tensor::fromMove(b->data(), {b->shape()[0], 1}, {1, 1}).intl;
+
+    bassinet::Tensor gradTensor;
+    if (child.shape().size() == 1) {
+        if (aWas1D && bWas1D) { // see end of matmulBackward for child depromotion logic
+            gradTensor = bassinet::Tensor::fromMove(child.grad(), {1, 1}, {1, 1});
+        } else if (aWas1D) { // [1, N] before depromotion
+            gradTensor = bassinet::Tensor::fromMove(child.grad(), {1, child.shape()[0]}, {child.shape()[0], 1});
+        } else if (bWas1D) { // [N, 1] before depromotion
+            gradTensor = bassinet::Tensor::fromMove(child.grad(), {child.shape()[0], 1}, {1, 1});
         }
     }
-    if (parents[1]->gradRequired()) {
-        bassinet::Tensor gradTensor = bassinet::Tensor::fromMove(child.grad(), child.shape(), child.stride());
-        if (parents[0]->shape().size() >= 2) {
-            bassinet::Tensor aT{parents[0]->transpose(parents[0]->shape().size() - 1, parents[0]->shape().size() - 2)};
-            parents[1]->addToGrad(*matmulForward({aT.intl, gradTensor.intl}).intl->data());
-        } else {
-            bassinet::Tensor aT{parents[0]};
-            parents[1]->addToGrad(*matmulForward({aT.intl, gradTensor.intl}).intl->data());
+
+    if (parents[0]->gradRequired()) {
+        bassinet::Tensor bT{b->transpose(b->shape().size() - 1, b->shape().size() - 2)};
+        bassinet::Tensor res(matmulForward({gradTensor.intl, bT.intl}));
+
+        if (aWas1D) {
+            std::vector<size_t> resShape{res.intl->shape()};
+            std::vector<size_t> resStride{res.intl->stride()};
+            resShape.erase(resShape.end() - 2);
+            resStride.erase(resStride.end() - 2);
+            res = bassinet::Tensor::fromMove(res.intl->data(), resShape, resStride);
         }
+        parents[0]->addToGrad(*res.intl->data());
+    }
+    if (parents[1]->gradRequired()) {
+        bassinet::Tensor aT{a->transpose(a->shape().size() - 1, a->shape().size() - 2)};
+        bassinet::Tensor res(matmulForward({aT.intl, gradTensor.intl}));
+
+        if (bWas1D) {
+            std::vector<size_t> resShape{res.intl->shape()};
+            std::vector<size_t> resStride{res.intl->stride()};
+            resShape.pop_back();
+            resStride.pop_back();
+            res = bassinet::Tensor::fromMove(res.intl->data(), resShape, resStride);
+        }
+        parents[1]->addToGrad(*res.intl->data());
     }
 };
 
