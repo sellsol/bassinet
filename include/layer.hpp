@@ -15,4 +15,10 @@ namespace bassinet {
         Tensor forward(Tensor& x);
         std::vector<Tensor> parameters();
     };
+
+    bassinet::Tensor relu(bassinet::Tensor parent);
+    class ReLU {
+    public:
+        Tensor forward(Tensor& x);
+    };
 }
