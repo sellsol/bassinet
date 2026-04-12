@@ -239,40 +239,70 @@ bassinet::Tensor bassinet::Tensor::fromMove(const std::shared_ptr<std::vector<fl
 }
 
 
+std::vector<size_t> broadcastShape(const bassinet::TensorIntl& a, const bassinet::TensorIntl& b) {
+    std::vector<size_t> targetShape(std::max(a.shape().size(), b.shape().size()));
+
+    for (size_t i = 0; i < targetShape.size(); ++i) {
+        size_t aRankSize{1}, bRankSize{1};
+        if (a.shape().size() >= i + 1) aRankSize = a.shape()[a.shape().size() - 1 - i];
+        if (b.shape().size() >= i + 1) bRankSize = b.shape()[b.shape().size() - 1 - i];
+
+        if (aRankSize != bRankSize && aRankSize != 1 && bRankSize != 1) throw std::invalid_argument("broadcastShape: Tensor dimensions not the same or broadcastable");
+        targetShape[targetShape.size() - 1 - i] = std::max(aRankSize, bRankSize);
+    }
+    return targetShape;
+}
+
+bassinet::TensorIntl broadcastTensor(const bassinet::TensorIntl& parent, const std::vector<size_t>& targetShape) {
+    if (parent.shape().size() > targetShape.size()) throw std::invalid_argument("broadcastTensor: parent tensor rank cannot exceed partner rank");
+
+    std::vector<size_t> broadcastStride(targetShape.size());
+    for (size_t i = 0; i < targetShape.size(); ++i) {
+        const size_t targetRank = targetShape.size() - 1 - i;
+
+        if (parent.shape().size() < i + 1) {
+            broadcastStride[targetRank] = 0;
+            continue;
+        }
+
+        const size_t parentRank = parent.shape().size() - 1 - i;
+        const size_t parentRankSize = parent.shape()[parentRank];
+        if (parentRankSize != targetShape[targetRank] && parentRankSize != 1) throw std::invalid_argument("broadcastTensor: Incompatible shapes for broadcasting");
+        broadcastStride[targetRank] = (parentRankSize == 1) ? 0 : parent.stride()[parentRank];
+    }
+
+    return bassinet::TensorIntl::fromMove(parent.data(), targetShape, broadcastStride);
+}
+
+std::vector<float> unbroadcastGrad(bassinet::TensorIntl& parent, bassinet::TensorIntl& child) {
+    if (parent.shape().size() > child.shape().size()) throw std::invalid_argument("unbroadcastGrad: Parent tensor rank cannot exceed child rank");
+    const size_t rankDiff{child.shape().size() - parent.shape().size()};
+
+    std::vector<float> reducedGrad(parent.size());
+    for (size_t childIdx = 0; childIdx < child.size(); ++childIdx) {
+        size_t parentIdx{0};
+        size_t remainder{childIdx};
+        for (size_t childRank = 0; childRank < child.shape().size(); ++childRank) {
+            size_t rankIdx{remainder % child.shape()[childRank]};
+            remainder /= child.shape()[childRank];
+
+            if (childRank < rankDiff) continue;
+            if (parent.shape()[childRank - rankDiff] == 1) continue;
+            parentIdx += rankIdx * parent.stride()[childRank - rankDiff];
+        }
+        reducedGrad[parentIdx] += child.grad()[childIdx];
+    }
+
+    return reducedGrad;
+}
+
 void addBackward(std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents, bassinet::TensorIntl& child);
 bassinet::Tensor addForward(const std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents) {
     if (parents.size() != 2) throw std::invalid_argument("addForward: Operation only supports two parents");
 
-    std::vector<size_t> resShape(std::max(parents[0]->shape().size(), parents[1]->shape().size()));
-
-    std::vector<size_t> thisBroadcastStride(resShape.size());
-    std::vector<size_t> otherBroadcastStride(resShape.size());
-    size_t thisOffset{1};
-    size_t otherOffset{1};
-    for (size_t i = 0; i < resShape.size(); ++i) {
-        size_t thisDimShape, otherDimShape;
-        if (parents[0]->shape().size() >= i + 1) { // shape.size() - 1 - i >= 0
-            thisDimShape = parents[0]->shape()[parents[0]->shape().size() - 1 - i];
-            thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = (thisDimShape == 1) ? 0 : thisOffset;
-            if (thisDimShape != 1) thisOffset *= thisDimShape;
-        } else {
-            thisDimShape = 1; // actually 0, but easier comparison like this
-            thisBroadcastStride[thisBroadcastStride.size() - 1 - i] = 0;
-        }
-
-        if (parents[1]->shape().size() >= i + 1) {
-            otherDimShape = parents[1]->shape()[parents[1]->shape().size() - 1 - i];
-            otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = (otherDimShape == 1) ? 0 : otherOffset;
-            if (otherDimShape != 1) otherOffset *= otherDimShape;
-        } else {
-            otherDimShape = 1;
-            otherBroadcastStride[otherBroadcastStride.size() - 1 - i] = 0;
-        }
-
-        if (thisDimShape != otherDimShape && thisDimShape != 1 && otherDimShape != 1) throw std::invalid_argument("Tensor::matmul: Tensor batch dimensions not the same or broadcastable");
-
-        resShape[resShape.size() - 1 - i] = std::max(thisDimShape, otherDimShape);
-    }
+    std::vector<size_t> resShape = broadcastShape(*parents[0], *parents[1]);
+    bassinet::TensorIntl aBroadcast = broadcastTensor(*parents[0], resShape);
+    bassinet::TensorIntl bBroadcast = broadcastTensor(*parents[1], resShape);
 
     size_t resSize{1};
     std::vector<size_t> resStride{std::vector<size_t>(resShape.size())};
@@ -285,14 +315,14 @@ bassinet::Tensor addForward(const std::vector<std::shared_ptr<bassinet::TensorIn
 
     for (size_t idx = 0; idx < (*resData).size(); ++idx) {
         size_t remainder{idx};
-        size_t thisIdx{0}, otherIdx{0};
+        size_t aIdx{0}, bIdx{0};
         for (size_t i = resShape.size(); i-- > 0; ) {
-            size_t coord = remainder % resShape[i];
-            thisIdx += coord * thisBroadcastStride[i];
-            otherIdx += coord * otherBroadcastStride[i];
+            size_t rankIdx{remainder % resShape[i]};
+            aIdx += rankIdx * aBroadcast.stride()[i];
+            bIdx += rankIdx * bBroadcast.stride()[i];
             remainder /= resShape[i];
         }
-        (*resData)[idx] = (*parents[0]->data())[thisIdx] + (*parents[1]->data())[otherIdx];
+        (*resData)[idx] = (*aBroadcast.data())[aIdx] + (*bBroadcast.data())[bIdx];
     }
 
     return bassinet::Tensor::fromMove(
@@ -303,10 +333,10 @@ bassinet::Tensor addForward(const std::vector<std::shared_ptr<bassinet::TensorIn
 }
 
 void addBackward(std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents, bassinet::TensorIntl& child) {
-    if (!parents.size()) throw std::invalid_argument("addBackward: Operation only supports two parents");
+    if (parents.size() != 2) throw std::invalid_argument("addBackward: Operation only supports two parents");
 
-    if (parents[0]->gradRequired()) parents[0]->addToGrad(child.grad());
-    if (parents[1]->gradRequired()) parents[1]->addToGrad(child.grad());
+    if (parents[0]->gradRequired()) parents[0]->addToGrad(unbroadcastGrad(*parents[0], child));
+    if (parents[1]->gradRequired()) parents[1]->addToGrad(unbroadcastGrad(*parents[1], child));
 }
 
 bassinet::Tensor bassinet::Tensor::operator+(bassinet::Tensor& other) {
@@ -432,7 +462,7 @@ void matmulBackward(std::vector<std::shared_ptr<bassinet::TensorIntl>>& parents,
     if (aWas1D) a = bassinet::Tensor::fromMove(a->data(), {1, a->shape()[0]}, {a->shape()[0], 1}).intl;
     if (bWas1D) b = bassinet::Tensor::fromMove(b->data(), {b->shape()[0], 1}, {1, 1}).intl;
 
-    bassinet::Tensor gradTensor;
+    bassinet::Tensor gradTensor = bassinet::Tensor::fromMove(child.grad(), child.shape(), child.stride());
     if (child.shape().size() == 1) {
         if (aWas1D && bWas1D) { // see end of matmulBackward for child depromotion logic
             gradTensor = bassinet::Tensor::fromMove(child.grad(), {1, 1}, {1, 1});
